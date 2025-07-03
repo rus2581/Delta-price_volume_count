@@ -1,176 +1,308 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Binance Futures Trades Chart</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/moment"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-moment"></script>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Binance Futures Trades Chart</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/moment"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-moment"></script>
+  <style>
+    html, body {
+      margin: 0; padding: 0; height: 100%;
+      overflow: hidden;
+      background: #121212;
+      color: #eee;
+      font-family: Arial, sans-serif;
+      display: flex;
+      flex-direction: column;
+    }
+    #controls {
+      padding: 10px;
+      background: #222;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+      flex-shrink: 0;
+    }
+    label, select, input, button {
+      padding: 6px 10px;
+      background: #333;
+      border: none;
+      border-radius: 4px;
+      color: #eee;
+      font-size: 14px;
+    }
+    button {
+      background: #3a86ff;
+      cursor: pointer;
+      user-select: none;
+    }
+    button:hover {
+      background: #285fcb;
+    }
+    #chartContainer {
+      flex-grow: 1;
+      padding: 10px;
+      min-height: 0; /* важно для корректного flex */
+    }
+    canvas {
+      width: 100% !important;
+      height: 100% !important;
+      background: #1e1e1e;
+      border-radius: 8px;
+      display: block;
+    }
+  </style>
 </head>
 <body>
+  <div id="controls">
     <label for="coinSearch">Search Coin:</label>
-    <input type="text" id="coinSearch" placeholder="Type to search..." oninput="filterCoins()">
-    
+    <input type="text" id="coinSearch" placeholder="Type to search..." oninput="filterCoins()" />
+
     <label for="coinSelect">Select Coin:</label>
-    <select id="coinSelect" onchange="updateSymbol()">
-        <option value="" disabled selected>Loading...</option>
+    <select id="coinSelect" onchange="onCoinChange()">
+      <option value="" disabled selected>Loading...</option>
     </select>
 
     <label for="startTime">Start Time:</label>
-    <input type="datetime-local" id="startTime">
-    
-    <label for="endTime">End Time:</label>
-    <input type="datetime-local" id="endTime">
-    
-    <button onclick="fetchAllTrades()">Update Charts</button>
+    <input type="datetime-local" id="startTime" />
 
-    <label for="autoUpdate">Auto Update:</label>
-    <select id="autoUpdate" onchange="toggleAutoUpdate()">
-        <option value="0">Off</option>
-        <option value="30">30 sec</option>
-        <option value="60">1 min</option>
-    </select>
-    
+    <button onclick="loadHistory()">Load History</button>
+  </div>
+
+  <div id="chartContainer">
     <canvas id="combinedChart"></canvas>
+  </div>
 
-    <script>
-        let combinedChart;
-        let symbol = ""; // По умолчанию пустой
-        let autoUpdateInterval;
-        let coinList = [];
+  <script>
+    let combinedChart;
+    let symbol = "";
+    let knownTradeIds = new Set();
+    let updateIntervalId = null;
 
-        async function fetchCoins() {
-            try {
-                console.log("Fetching futures coins...");
-                const response = await fetch("https://fapi.binance.com/fapi/v1/exchangeInfo");
-                const data = await response.json();
+    async function fetchCoins() {
+      try {
+        const res = await fetch("https://fapi.binance.com/fapi/v1/exchangeInfo");
+        const data = await res.json();
+        const select = document.getElementById('coinSelect');
+        select.innerHTML = '<option value="" disabled selected>Select a coin</option>';
+        data.symbols.filter(s => s.status === "TRADING").forEach(s => {
+          const opt = document.createElement('option');
+          opt.value = s.symbol;
+          opt.textContent = s.symbol;
+          select.appendChild(opt);
+        });
+      } catch (e) {
+        console.error("Error fetching coins", e);
+      }
+    }
 
-                if (!data.symbols) {
-                    console.error("API response does not contain symbols:", data);
-                    return;
-                }
+    function filterCoins() {
+      const input = document.getElementById('coinSearch').value.toUpperCase();
+      const options = document.getElementById('coinSelect').options;
+      for (let i = 0; i < options.length; i++) {
+        const option = options[i];
+        option.style.display = option.value.includes(input) ? "" : "none";
+      }
+    }
 
-                // Загружаем все активные фьючерсные монеты
-                coinList = data.symbols
-                    .filter(s => s.status === "TRADING")
-                    .map(s => s.symbol);
+    function onCoinChange() {
+      symbol = document.getElementById('coinSelect').value;
+      knownTradeIds.clear();
+      if (combinedChart) {
+        combinedChart.data.datasets.forEach(ds => ds.data = []);
+        combinedChart.update();
+      }
+      const now = new Date();
+      const earlier = new Date(now.getTime() - 60 * 60 * 1000);
+      document.getElementById('startTime').value = earlier.toISOString().slice(0, 16);
 
-                console.log("Total futures coins fetched:", coinList.length);
-                populateCoinSelect();
-            } catch (error) {
-                console.error("Error fetching futures coins:", error);
+      // Останавливаем автообновление, если было
+      if (updateIntervalId) {
+        clearInterval(updateIntervalId);
+        updateIntervalId = null;
+      }
+    }
+
+    async function loadHistory() {
+      if (!symbol) {
+        alert("Select a coin first");
+        return;
+      }
+      const startInput = document.getElementById('startTime').value;
+      if (!startInput) {
+        alert("Select start time");
+        return;
+      }
+      const startTime = new Date(startInput).getTime();
+      const endTime = Date.now();
+
+      let allTrades = [];
+      let currentStart = startTime;
+
+      try {
+        while (currentStart < endTime) {
+          const url = `https://fapi.binance.com/fapi/v1/aggTrades?symbol=${symbol}&startTime=${currentStart}&endTime=${endTime}&limit=1000`;
+          const res = await fetch(url);
+          if (!res.ok) throw new Error("API error " + res.status);
+          const trades = await res.json();
+          if (!trades.length) break;
+
+          allTrades = allTrades.concat(trades);
+
+          const lastTs = trades[trades.length - 1].T;
+          if (lastTs <= currentStart) break;
+          currentStart = lastTs + 1;
+
+          await new Promise(r => setTimeout(r, 150));
+        }
+
+        processTrades(allTrades);
+
+        // Запускаем автообновление графика раз в минуту
+        if (updateIntervalId) clearInterval(updateIntervalId);
+        updateIntervalId = setInterval(loadHistory, 60000);
+
+      } catch (e) {
+        console.error(e);
+        alert("Failed to load history: " + e.message);
+      }
+    }
+
+    function processTrades(trades) {
+      knownTradeIds.clear();
+
+      const priceData = [];
+      const volumeData = [];
+      const orderData = [];
+
+      let accumulatedVolume = 0;
+      let accumulatedOrders = 0;
+
+      trades.forEach(t => {
+        if (!knownTradeIds.has(t.a)) {
+          knownTradeIds.add(t.a);
+
+          const ts = t.T;
+          const p = parseFloat(t.p);
+          const q = parseFloat(t.q);
+          const isBuyerMaker = t.m;
+
+          priceData.push({ x: ts, y: p });
+
+          accumulatedVolume += isBuyerMaker ? -q : q;
+          volumeData.push({ x: ts, y: accumulatedVolume });
+
+          accumulatedOrders += isBuyerMaker ? -1 : 1;
+          orderData.push({ x: ts, y: accumulatedOrders });
+        }
+      });
+
+      if (combinedChart) {
+        combinedChart.data.datasets[0].data = priceData;
+        combinedChart.data.datasets[1].data = volumeData;
+        combinedChart.data.datasets[2].data = orderData;
+        combinedChart.update();
+      } else {
+        drawCombinedChart(priceData, volumeData, orderData);
+      }
+    }
+
+    function drawCombinedChart(priceData, volumeData, orderData) {
+      const ctx = document.getElementById('combinedChart');
+
+      if (combinedChart) combinedChart.destroy();
+
+      combinedChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+          datasets: [
+            {
+              label: 'Price',
+              data: priceData,
+              borderColor: 'dodgerblue',
+              yAxisID: 'y',
+              pointRadius: 0,
+              borderWidth: 1.5,
+              fill: false,
+              tension: 0.1,
+            },
+            {
+              label: 'Delta Volume',
+              data: volumeData,
+              borderColor: 'tomato',
+              yAxisID: 'y1',
+              pointRadius: 0,
+              borderWidth: 1,
+              fill: false,
+              tension: 0.1,
+            },
+            {
+              label: 'Delta Orders',
+              data: orderData,
+              borderColor: 'limegreen',
+              yAxisID: 'y2',
+              pointRadius: 0,
+              borderWidth: 1,
+              fill: false,
+              tension: 0.1,
             }
-        }
-
-        function populateCoinSelect() {
-            const coinSelect = document.getElementById('coinSelect');
-            coinSelect.innerHTML = '<option value="" disabled selected>Select a coin</option>'; // Очищаем список
-
-            coinList.forEach(coin => {
-                const option = document.createElement('option');
-                option.value = coin;
-                option.textContent = coin;
-                coinSelect.appendChild(option);
-            });
-
-            console.log("Dropdown populated with", coinList.length, "coins");
-        }
-
-        function filterCoins() {
-            const input = document.getElementById('coinSearch').value.toUpperCase();
-            const coinSelect = document.getElementById('coinSelect');
-            const options = coinSelect.getElementsByTagName('option');
-
-            for (let i = 1; i < options.length; i++) {
-                const option = options[i];
-                option.style.display = option.value.includes(input) ? "" : "none";
+          ]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          animation: false,
+          interaction: { mode: 'nearest', intersect: false },
+          scales: {
+            x: {
+              type: 'time',
+              time: {
+                unit: 'minute',
+                tooltipFormat: 'DD MMM yyyy, HH:mm:ss',
+              },
+              ticks: { color: '#eee' },
+              grid: { color: '#444' },
+            },
+            y: {
+              type: 'linear',
+              position: 'left',
+              title: { display: true, text: 'Price', color: '#eee' },
+              ticks: { color: '#eee' },
+              grid: { color: '#444' },
+            },
+            y1: {
+              type: 'linear',
+              position: 'right',
+              title: { display: true, text: 'Delta Volume', color: '#eee' },
+              grid: { drawOnChartArea: false },
+              ticks: { color: '#eee' },
+            },
+            y2: {
+              type: 'linear',
+              position: 'right',
+              offset: true,
+              title: { display: true, text: 'Delta Orders', color: '#eee' },
+              grid: { drawOnChartArea: false },
+              ticks: { color: '#eee' },
             }
-        }
-
-        function updateSymbol() {
-            symbol = document.getElementById('coinSelect').value;
-            console.log("Selected symbol:", symbol);
-        }
-
-        async function fetchAllTrades() {
-            if (!symbol) {
-                alert("Please select a coin first.");
-                return;
+          },
+          plugins: {
+            legend: { labels: { color: '#eee' } },
+            tooltip: {
+              mode: 'nearest',
+              intersect: false,
             }
-            const startTime = new Date(document.getElementById('startTime').value).getTime();
-            const endTime = new Date(document.getElementById('endTime').value).getTime();
-            if (!startTime || !endTime) {
-                alert("Please select both start and end time.");
-                return;
-            }
-
-            let allTrades = [], currentStartTime = startTime;
-            try {
-                while (currentStartTime < endTime) {
-                    const url = `https://fapi.binance.com/fapi/v1/aggTrades?symbol=${symbol}&startTime=${currentStartTime}&endTime=${endTime}&limit=1000`;
-                    const response = await fetch(url);
-                    if (!response.ok) throw new Error(`API Error: ${response.statusText}`);
-                    const trades = await response.json();
-                    if (trades.length === 0) break;
-                    allTrades = allTrades.concat(trades);
-                    currentStartTime = trades[trades.length - 1].T + 1;
-                }
-                processTrades(allTrades);
-            } catch (error) {
-                console.error("Error fetching data:", error);
-                alert("An error occurred while fetching data.");
-            }
+          }
         }
+      });
+    }
 
-        function processTrades(trades) {
-            const priceData = trades.map(t => ({ x: t.T, y: parseFloat(t.p) }));
-            let accumulatedVolume = 0, accumulatedOrders = 0;
-            const volumeData = trades.map(t => {
-                accumulatedVolume += parseFloat(t.q) * (t.m ? -1 : 1);
-                return { x: t.T, y: accumulatedVolume };
-            });
-            const orderData = trades.map(t => {
-                accumulatedOrders += t.m ? -1 : 1;
-                return { x: t.T, y: accumulatedOrders };
-            });
-            drawCombinedChart(priceData, volumeData, orderData);
-        }
-
-        function drawCombinedChart(priceData, volumeData, orderData) {
-            const ctx = document.getElementById('combinedChart');
-            if (combinedChart) combinedChart.destroy();
-            combinedChart = new Chart(ctx, {
-                type: 'line',
-                data: {
-                    datasets: [
-                        { label: 'Price', data: priceData, borderColor: 'blue', yAxisID: 'y', pointRadius: 0 },
-                        { label: 'Delta Volume', data: volumeData, borderColor: 'red', yAxisID: 'y1', pointRadius: 0 },
-                        { label: 'Delta Order', data: orderData, borderColor: 'green', yAxisID: 'y2', pointRadius: 0 }
-                    ]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: true,
-                    scales: {
-                        x: { type: 'time', time: { unit: 'minute' } },
-                        y: { position: 'left', title: { display: true, text: 'Price' } },
-                        y1: { position: 'right', title: { display: true, text: 'Delta Volume' }, grid: { drawOnChartArea: false } },
-                        y2: { position: 'right', title: { display: true, text: 'Delta Order' }, grid: { drawOnChartArea: false } }
-                    }
-                }
-            });
-        }
-
-        function toggleAutoUpdate() {
-            const interval = parseInt(document.getElementById('autoUpdate').value) * 1000;
-            if (autoUpdateInterval) clearInterval(autoUpdateInterval);
-            if (interval > 0) {
-                autoUpdateInterval = setInterval(fetchAllTrades, interval);
-            }
-        }
-
-        fetchCoins();
-    </script>
+    // Инициализация
+    fetchCoins();
+  </script>
 </body>
 </html>
+
