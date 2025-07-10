@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Binance Futures Trades Chart (REST + WebSocket)</title>
+  <title>Binance Futures Trades Chart</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/moment"></script>
   <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-moment"></script>
@@ -64,7 +64,7 @@
       display: none;
       z-index: 100;
     }
-    #toggleLogBtn {
+    #toggleLogBtn, #saveTxtBtn {
       width: 20px;
       height: 20px;
       padding: 0;
@@ -96,6 +96,7 @@
 
     <button id="loadBtn" onclick="startRestLoad()">Load History</button>
     <button id="toggleLogBtn" onclick="toggleLog()" title="Show/Hide Log">L</button>
+    <button id="saveTxtBtn" onclick="saveToTxt()" title="Save to TXT">S</button>
   </div>
 
   <div id="chartContainer">
@@ -139,16 +140,15 @@
     logEl.textContent += `[${time}] ${msg}\n`;
     logEl.scrollTop = logEl.scrollHeight;
   }
+
   function clearLog() {
-    const logEl = document.getElementById('logOverlay');
-    logEl.textContent = "";
+    document.getElementById('logOverlay').textContent = "";
   }
+
   function toggleLog() {
     const logEl = document.getElementById('logOverlay');
+    logEl.style.display = (logEl.style.display === 'block') ? 'none' : 'block';
     if (logEl.style.display === 'block') {
-      logEl.style.display = 'none';
-    } else {
-      logEl.style.display = 'block';
       logEl.scrollTop = logEl.scrollHeight;
     }
   }
@@ -202,22 +202,14 @@
   }
 
   async function startRestLoad() {
-    if (!symbol) {
-      alert("Select a coin first");
-      return;
-    }
+    if (!symbol) return alert("Select a coin first");
     const startInput = document.getElementById('startTime').value;
-    if (!startInput) {
-      alert("Select start time");
-      return;
-    }
+    if (!startInput) return alert("Select start time");
 
     clearLog();
-    document.getElementById('logOverlay').style.display = 'block';
     log(`Starting REST load for ${symbol} from ${startInput}`);
 
     DataStore.clear();
-
     const startTime = new Date(startInput).getTime();
     const endTime = Date.now();
     let currentStart = startTime;
@@ -231,7 +223,6 @@
         const res = await fetch(url);
         if (!res.ok) throw new Error(`API error ${res.status}`);
         const trades = await res.json();
-
         if (!trades.length) {
           log("No more trades found, stopping REST load.");
           break;
@@ -247,14 +238,11 @@
         }
 
         currentStart = lastTs + 1;
-
         await delay(250);
       }
 
       log(`REST loading complete. Trades loaded: ${allLoaded}`);
-
       drawChartFromDataStore();
-
       log("Starting WebSocket connection for live updates...");
       startWebSocket();
 
@@ -268,45 +256,29 @@
   }
 
   function startWebSocket() {
-    if (ws) {
-      ws.close();
-      ws = null;
-    }
+    if (ws) ws.close();
     if (!symbol) return;
 
     const lowerSymbol = symbol.toLowerCase();
     const wsUrl = `wss://fstream.binance.com/ws/${lowerSymbol}@aggTrade`;
     ws = new WebSocket(wsUrl);
 
-    ws.onopen = () => {
-      log(`WebSocket connected to ${wsUrl}`);
-    };
-
+    ws.onopen = () => log(`WebSocket connected to ${wsUrl}`);
     ws.onmessage = (evt) => {
       const data = JSON.parse(evt.data);
       if (!DataStore.knownTradeIds.has(data.a)) {
         DataStore.addTrades([data]);
       }
     };
-
-    ws.onerror = (err) => {
-      log(`WebSocket error: ${err.message || err}`);
-    };
-
-    ws.onclose = (evt) => {
-      log(`WebSocket closed (code: ${evt.code}, reason: ${evt.reason})`);
-    };
+    ws.onerror = (err) => log(`WebSocket error: ${err.message || err}`);
+    ws.onclose = (evt) => log(`WebSocket closed (code: ${evt.code}, reason: ${evt.reason})`);
   }
 
   function drawChartFromDataStore() {
     if (!DataStore.trades.length) return;
 
-    const priceData = [];
-    const volumeData = [];
-    const orderData = [];
-
-    let accumulatedVolume = 0;
-    let accumulatedOrders = 0;
+    const priceData = [], volumeData = [], orderData = [];
+    let accumulatedVolume = 0, accumulatedOrders = 0;
 
     for (const t of DataStore.trades) {
       const ts = t.T;
@@ -376,6 +348,42 @@
         }
       });
     }
+  }
+
+  function saveToTxt() {
+    if (!DataStore.trades.length) {
+      alert("Нет данных для сохранения.");
+      return;
+    }
+
+    let txtContent = `Symbol: ${symbol}\nTotal Trades: ${DataStore.trades.length}\n\n`;
+    txtContent += `Time\t\t\tPrice\t\tDelta Volume\tDelta Orders\n`;
+    txtContent += `---------------------------------------------------------------\n`;
+
+    let accumulatedVolume = 0;
+    let accumulatedOrders = 0;
+
+    for (const t of DataStore.trades) {
+      const time = new Date(t.T).toISOString();
+      const price = parseFloat(t.p);
+      const quantity = parseFloat(t.q);
+      const isBuyerMaker = t.m;
+
+      accumulatedVolume += isBuyerMaker ? -quantity : quantity;
+      accumulatedOrders += isBuyerMaker ? -1 : 1;
+
+      txtContent += `${time}\t${price.toFixed(4)}\t\t${accumulatedVolume.toFixed(4)}\t\t${accumulatedOrders}\n`;
+    }
+
+    const blob = new Blob([txtContent], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${symbol}_data_${new Date().toISOString().replace(/[:.]/g, '_')}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   }
 
   function delay(ms) {
